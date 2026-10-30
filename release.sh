@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Sign, notarize and staple the go.claude disk image — v1.0.0
+# Sign, notarize and staple the go.claude disk image — v1.0.1
 #
 # Builds dist/go.claude-<version>.dmg holding go.claude, README.md and LICENSE,
 # signs it with the Developer ID, notarizes it with the PixProNotary keychain
@@ -8,7 +8,7 @@
 set -e
 cd "${0:A:h}"
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 SIGN_ID="4208ABA3EC12F24C1F09C7BB624EFF68B44259DB"
 PROFILE="PixProNotary"
 DMG="dist/go.claude-${VERSION}.dmg"

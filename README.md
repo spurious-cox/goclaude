@@ -19,7 +19,7 @@ locations, on top of the original idea.
 
 ## Install
 
-Download `go.claude-1.0.0.dmg` from the
+Download `go.claude-1.0.1.dmg` from the
 [latest release](https://github.com/spurious-cox/go.claude/releases/latest)
 (signed with a Developer ID and notarized by Apple), or just copy the
 `go.claude` file from this repository. Put it somewhere on your machine, for

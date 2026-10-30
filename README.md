@@ -8,6 +8,15 @@ into a folder, opens a file in your editor, launches an app, and so on.
 It is one Python 3 script with no dependencies beyond the standard library.
 macOS only (it uses `open` and `qlmanage`).
 
+## History
+
+`go` began as a UNIX shell script for jumping between directories. It was then
+carried over to Linux shell scripting, and later rewritten again as a macOS
+shell script. This version is the final stage: a Python tool enhanced with
+Claude (Anthropic) that adds file, document, app and executable bookmarks,
+partial-name matching, QuickLook, Finder reveal and in-place repair of moved
+locations, on top of the original idea.
+
 ## Install
 
 Download `go.claude-1.0.0.dmg` from the

@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+# go.claude - Location bookmarking and navigation tool
+# Created by Claude (Anthropic) - January 2026
+
+import os
+import sys
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+GO_LOCATIONS = Path.home() / '.go_locations'
+
+def parse_line(line):
+    """Parse a line from go_locations file."""
+    line = line.rstrip('\n')
+    if not line.strip():
+        return None
+    
+    parts = line.split()
+    if len(parts) < 4:
+        return None
+    
+    mnemonic = parts[0]
+    # Path is in quotes, find it
+    quote_start = line.find("'")
+    quote_end = line.find("'", quote_start + 1)
+    if quote_start == -1 or quote_end == -1:
+        return None
+    
+    path = line[quote_start+1:quote_end]
+    remaining = line[quote_end+1:].split()
+    if len(remaining) < 2:
+        return None
+    
+    date = remaining[0]
+    type_char = remaining[1]
+    
+    return {
+        'mnemonic': mnemonic,
+        'path': path,
+        'date': date,
+        'type': type_char
+    }
+
+def read_locations():
+    """Read and parse the go_locations file."""
+    if not GO_LOCATIONS.exists():
+        return []
+    
+    locations = []
+    with open(GO_LOCATIONS, 'r') as f:
+        for line in f:
+            entry = parse_line(line)
+            if entry:
+                locations.append(entry)
+    return locations
+
+def write_locations(locations):
+    """Write locations to file in the correct format."""
+    with open(GO_LOCATIONS, 'w') as f:
+        for loc in locations:
+            # Calculate padding for alignment
+            mnemonic_field = f"{loc['mnemonic']:<12}"
+            path_field = f"'{loc['path']}'"
+            # Pad path to align dates (adjust 60 as needed)
+            padding = max(1, 60 - len(path_field))
+            line = f"{mnemonic_field} {path_field}{' ' * padding} {loc['date']} {loc['type']}\n"
+            f.write(line)
+
+def sort_locations_alpha(locations):
+    """Sort locations alphabetically by mnemonic."""
+    return sorted(locations, key=lambda x: x['mnemonic'].lstrip('#').lower())
+
+def sort_locations_by_date(locations):
+    """Sort locations by date."""
+    return sorted(locations, key=lambda x: x['date'], reverse=True)
+
+def find_mnemonic(locations, partial):
+    """Find mnemonic by partial match (minimum characters)."""
+    partial = partial.lower()  # Convert search to lowercase
+    
+    # Exact match first
+    for loc in locations:
+        if loc['mnemonic'] == partial:
+            return loc
+    
+    # Partial match - find all matches not starting with #
+    matches = [loc for loc in locations if 
+               not loc['mnemonic'].startswith('#') and 
+               loc['mnemonic'].startswith(partial)]
+    
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        print(f"Error: Ambiguous mnemonic '{partial}'. Matches:", file=sys.stderr)
+        for m in matches:
+            print(f"  {m['mnemonic']}", file=sys.stderr)
+        sys.exit(1)
+    
+    return None
+
+def print_locations(locations):
+    """Print locations in formatted output."""
+    for loc in locations:
+        mnemonic_field = f"{loc['mnemonic']:<12}"
+        path_field = f"'{loc['path']}'"
+        padding = max(1, 60 - len(path_field))
+        print(f"{mnemonic_field} {path_field}{' ' * padding} {loc['date']} {loc['type']}", file=sys.stderr)
+
+def get_current_timestamp():
+    """Get current timestamp in the required format."""
+    return datetime.now().strftime('%y%m%d.%H%M%S')
+
+def get_type(path):
+    """Determine type based on path."""
+    p = Path(path)
+    if p.suffix == '.app':
+        return 'b'
+    elif p.is_dir():
+        return 'd'
+    elif p.is_file():
+        # Check for macOS document types that need 'open'
+        mac_doc_extensions = [
+            '.numbers', '.pages', '.key', '.keynote',  # Apple iWork
+            '.xlsx', '.docx', '.pptx',  # Microsoft Office
+            '.ods', '.odt', '.odp', '.odg', '.odb', '.odf',  # LibreOffice/OpenOffice
+            '.csv'  # CSV files
+        ]
+        if p.suffix.lower() in mac_doc_extensions:
+            return 'm'  # macOS document
+        # Check if executable
+        if os.access(path, os.X_OK) and not path.endswith(('.txt', '.md', '.py', '.sh')):
+            return 'e'
+        return 'f'
+    return 'd'  # default
+
+def add_location(mnemonic, path, force=False):
+    """Add a new location."""
+    mnemonic = mnemonic.lower()  # Convert to lowercase
+    path = os.path.expanduser(path)
+    path = os.path.abspath(path)  # Convert to absolute path
+    if not force and not os.path.exists(path):
+        print(f"Error: Path does not exist: {path}", file=sys.stderr)
+        print(f"Use 'go -add -f {mnemonic} {path}' to add anyway", file=sys.stderr)
+        sys.exit(1)
+    
+    locations = read_locations()
+    
+    # Check if mnemonic already exists
+    for loc in locations:
+        if loc['mnemonic'] == mnemonic:
+            print(f"Error: Mnemonic '{mnemonic}' already exists", file=sys.stderr)
+            sys.exit(1)
+    
+    # Determine type, or use '?' if path doesn't exist
+    if os.path.exists(path):
+        type_char = get_type(path)
+    else:
+        type_char = '?'
+    
+    new_entry = {
+        'mnemonic': mnemonic,
+        'path': path,
+        'date': get_current_timestamp(),
+        'type': type_char
+    }
+    
+    locations.append(new_entry)
+    locations = sort_locations_alpha(locations)
+    write_locations(locations)
+    if force and not os.path.exists(path):
+        print(f"Added: {mnemonic} -> {path} (path does not exist yet)", file=sys.stderr)
+    else:
+        print(f"Added: {mnemonic} -> {path}", file=sys.stderr)
+
+def disable_location(mnemonic):
+    """Disable a location by prefixing with #."""
+    mnemonic = mnemonic.lower()  # Convert to lowercase
+    locations = read_locations()
+    
+    found = False
+    for loc in locations:
+        # Check both with and without # prefix
+        if loc['mnemonic'] == mnemonic:
+            loc['mnemonic'] = '#' + mnemonic
+            found = True
+            break
+        elif loc['mnemonic'] == '#' + mnemonic:
+            print(f"Note: '{mnemonic}' is already disabled", file=sys.stderr)
+            return
+    
+    if not found:
+        print(f"Error: Mnemonic '{mnemonic}' not found", file=sys.stderr)
+        sys.exit(1)
+    
+    locations = sort_locations_alpha(locations)
+    write_locations(locations)
+    print(f"Disabled: {mnemonic}", file=sys.stderr)
+
+def repair_location(mnemonic, new_path):
+    """Repair a location with a new path."""
+    mnemonic = mnemonic.lower()  # Convert to lowercase
+    new_path = os.path.expanduser(new_path)
+    new_path = os.path.abspath(new_path)  # Convert to absolute path
+    if not os.path.exists(new_path):
+        print(f"Error: Path does not exist: {new_path}", file=sys.stderr)
+        sys.exit(1)
+    
+    locations = read_locations()
+    
+    found = False
+    for loc in locations:
+        if loc['mnemonic'] == mnemonic or loc['mnemonic'] == '#' + mnemonic:
+            loc['path'] = new_path
+            loc['date'] = get_current_timestamp()
+            loc['type'] = get_type(new_path)
+            # Remove # if present
+            loc['mnemonic'] = mnemonic.lstrip('#')
+            found = True
+            break
+    
+    if not found:
+        print(f"Error: Mnemonic '{mnemonic}' not found", file=sys.stderr)
+        sys.exit(1)
+    
+    locations = sort_locations_alpha(locations)
+    write_locations(locations)
+    print(f"Repaired: {mnemonic} -> {new_path}", file=sys.stderr)
+
+def which_location(mnemonic):
+    """Show the path for a mnemonic without executing."""
+    locations = read_locations()
+    loc = find_mnemonic(locations, mnemonic)
+    
+    if not loc:
+        print(f"Error: Mnemonic '{mnemonic}' not found", file=sys.stderr)
+        sys.exit(1)
+    
+    print(loc['path'], file=sys.stderr)
+
+def quicklook_location(mnemonic):
+    """Open a location in QuickLook."""
+    locations = read_locations()
+    loc = find_mnemonic(locations, mnemonic)
+    
+    if not loc:
+        print(f"Error: Mnemonic '{mnemonic}' not found", file=sys.stderr)
+        sys.exit(1)
+    
+    path = loc['path']
+    
+    if not os.path.exists(path):
+        print(f"Error: Path does not exist: {path}", file=sys.stderr)
+        sys.exit(1)
+    
+    # If it's a macOS document, open it normally instead of QuickLook
+    if loc['type'] == 'm':
+        print(f"Notice: QuickLook is not supported for this file type; opening with default application", file=sys.stderr)
+        subprocess.run(['open', path])
+        return
+    
+    # Allow QuickLook only on regular files and text-based executables
+    if loc['type'] not in ['f', 'e']:
+        print(f"Error: QuickLook only works on files, not directories or apps", file=sys.stderr)
+        print(f"  '{mnemonic}' is type '{loc['type']}'", file=sys.stderr)
+        sys.exit(1)
+    
+    # Run qlmanage with output suppressed
+    subprocess.run(['/usr/bin/qlmanage', '-p', path], 
+                   stdout=subprocess.DEVNULL, 
+                   stderr=subprocess.DEVNULL)
+
+def find_location(mnemonic):
+    """Open the location in Finder."""
+    locations = read_locations()
+    loc = find_mnemonic(locations, mnemonic)
+    
+    if not loc:
+        print(f"Error: Mnemonic '{mnemonic}' not found", file=sys.stderr)
+        sys.exit(1)
+    
+    path = loc['path']
+    
+    if not os.path.exists(path):
+        print(f"Error: Path does not exist: {path}", file=sys.stderr)
+        sys.exit(1)
+    
+    # If it's a file, reveal it in Finder; if directory, open the directory
+    if os.path.isfile(path):
+        subprocess.run(['open', '-R', path])  # -R reveals the file in Finder
+    else:
+        subprocess.run(['open', path])  # Opens the directory in Finder
+
+def edit_location(mnemonic):
+    """Open a plain text file in $EDITOR."""
+    locations = read_locations()
+    loc = find_mnemonic(locations, mnemonic)
+    
+    if not loc:
+        print(f"Error: Mnemonic '{mnemonic}' not found", file=sys.stderr)
+        sys.exit(1)
+    
+    # Allow editing files and text-based executables
+    if loc['type'] not in ['f', 'e']:
+        print(f"Error: Can only edit files, not directories or apps", file=sys.stderr)
+        print(f"  '{mnemonic}' is type '{loc['type']}'", file=sys.stderr)
+        sys.exit(1)
+    
+    editor = os.environ.get('EDITOR', 'vi')
+    
+    # If editor is a .app bundle, use 'open' to launch it
+    if editor.endswith('.app'):
+        subprocess.run(['open', '-a', editor, loc['path']])
+    else:
+        subprocess.run([editor, loc['path']])
+
+def execute_location(mnemonic):
+    """Execute the action based on type."""
+    locations = read_locations()
+    loc = find_mnemonic(locations, mnemonic)
+    
+    if not loc:
+        print(f"Error: Mnemonic '{mnemonic}' not found", file=sys.stderr)
+        sys.exit(1)
+    
+    path = loc['path']
+    type_char = loc['type']
+    
+    # Check if path exists for unknown types
+    if type_char == '?' or type_char not in ['d', 'f', 'e', 'b', 'm']:
+        if not os.path.exists(path):
+            print(f"Error: Path does not exist: {path}", file=sys.stderr)
+            print(f"Use 'go -repair {loc['mnemonic']} <new_path>' to fix", file=sys.stderr)
+            sys.exit(1)
+        # Re-detect type if it exists now
+        type_char = get_type(path)
+    
+    if type_char == 'd':
+        # Change directory - print command for shell to execute
+        print(f"cd '{path}'")
+    elif type_char == 'm':
+        # macOS document - open with default app
+        # Special handling for CSV - don't auto-open, just show options
+        if path.lower().endswith('.csv'):
+            print(f"# CSV file can be opened multiple ways. Choose one: (copy and paste)", file=sys.stderr)
+            print(f"open -a Numbers '{path}'", file=sys.stderr)
+            print(f"open -a 'LibreOffice' '{path}'", file=sys.stderr)
+            editor = os.environ.get('EDITOR', 'vi')
+            if editor.endswith('.app'):
+                app_name = Path(editor).stem
+                print(f"open -a '{app_name}' '{path}'", file=sys.stderr)
+            else:
+                print(f"{editor} '{path}'", file=sys.stderr)
+        else:
+            # Non-CSV documents open normally
+            subprocess.run(['open', path])
+    elif type_char == 'f':
+        editor = os.environ.get('EDITOR', 'vi')
+        # If editor is a .app bundle, use 'open' to launch it
+        if editor.endswith('.app'):
+            subprocess.run(['open', '-a', editor, path])
+        else:
+            subprocess.run([editor, path])
+    elif type_char == 'e':
+        subprocess.run([path])
+    elif type_char == 'b':
+        subprocess.run(['open', path])
+    else:
+        print(f"Error: Unknown type '{type_char}' for {mnemonic}", file=sys.stderr)
+        sys.exit(1)
+
+def print_help():
+    """Print help information."""
+    help_text = """go - Quick location bookmarking and navigation tool
+
+USAGE:
+    go                          List all locations
+    go mnemonic                 Navigate to or open location
+    go -add|-a [-f] mnemonic path  Add a new location (-f to force if path doesn't exist)
+    go -disable|-d mnemonic     Disable a location (prefix with #)
+    go -repair|-r mnemonic path Update path and re-enable location
+    go -which|-w mnemonic       Show the path for a mnemonic
+    go -quicklook|-q mnemonic   Open location in QuickLook
+    go -find|-fn mnemonic        Open location in Finder
+    go -edit|-e mnemonic        Edit a file location in $EDITOR
+    go -sort|-s                 List locations sorted by date
+    go -help|-h                 Show this help message
+
+LOCATION TYPES:
+    d - directory (changes to directory)
+    f - file (opens in $EDITOR)
+    m - macOS document (.numbers, .pages, .key, etc. - opens with default app)
+    e - executable (runs the file)
+    b - bundle/app (opens with 'open' command)
+
+EXAMPLES:
+    go -add proj ~/projects/myapp
+    go -a -f future ~/projects/notyet    # Add path that doesn't exist yet
+    go proj                              # Navigate to ~/projects/myapp
+    go -which proj                       # Show path: /home/user/projects/myapp
+    go -q proj                           # Open in QuickLook
+    go -d proj                           # Disable the 'proj' mnemonic
+    go -r proj ~/projects/newapp         # Repair with new path
+
+NOTES:
+    - Locations are stored in ~/.go_locations
+    - Partial mnemonics work if unambiguous (e.g., 'pro' matches 'projects')
+    - Disabled locations (prefixed with #) are ignored in searches
+    - For directory navigation, add to .zshrc:
+      go() { noglob eval $(python3 ~/bin/go.claude "$@"); }
+"""
+    print(help_text, file=sys.stderr)
+
+def main():
+    if len(sys.argv) == 1:
+        # Just print the file
+        locations = read_locations()
+        print_locations(locations)
+        # Print help notice to stderr so eval doesn't try to execute it
+        print("\n# Use 'go -help' for usage information", file=sys.stderr)
+        return
+    
+    cmd = sys.argv[1]
+    
+    if cmd in ['-help', '--help', '-h']:
+        print_help()
+    
+    elif cmd in ['-add', '-a']:
+        force = False
+        args = sys.argv[2:]
+        
+        # Check for -f or -force flag
+        if len(args) > 0 and args[0] in ['-f', '-force']:
+            force = True
+            args = args[1:]
+        
+        if len(args) != 2:
+            print("Usage: go -add [-f] mnemonic /path/to/location", file=sys.stderr)
+            sys.exit(1)
+        
+        add_location(args[0], args[1], force)
+    
+    elif cmd in ['-disable', '-d']:
+        if len(sys.argv) != 3:
+            print("Usage: go -disable mnemonic", file=sys.stderr)
+            sys.exit(1)
+        disable_location(sys.argv[2])
+    
+    elif cmd in ['-repair', '-r']:
+        if len(sys.argv) != 4:
+            print("Usage: go -repair mnemonic /path/to/location", file=sys.stderr)
+            sys.exit(1)
+        repair_location(sys.argv[2], sys.argv[3])
+    
+    elif cmd in ['-which', '-w']:
+        if len(sys.argv) != 3:
+            print("Usage: go -which mnemonic", file=sys.stderr)
+            sys.exit(1)
+        which_location(sys.argv[2])
+    
+    elif cmd in ['-quicklook', '-q']:
+        if len(sys.argv) != 3:
+            print("Usage: go -quicklook mnemonic", file=sys.stderr)
+            sys.exit(1)
+        quicklook_location(sys.argv[2])
+    
+    elif cmd in ['-find', '-fn']:
+        if len(sys.argv) != 3:
+            print("Usage: go -find mnemonic", file=sys.stderr)
+            sys.exit(1)
+        find_location(sys.argv[2])
+    
+    elif cmd in ['-sort', '-s']:
+        locations = read_locations()
+        locations = sort_locations_by_date(locations)
+        print_locations(locations)
+    
+    elif cmd in ['-edit', '-e']:
+        if len(sys.argv) != 3:
+            print("Usage: go -edit mnemonic", file=sys.stderr)
+            sys.exit(1)
+        edit_location(sys.argv[2])
+    
+    else:
+        # Execute the mnemonic
+        execute_location(cmd)
+
+if __name__ == '__main__':
+    main()

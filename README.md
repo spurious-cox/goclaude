@@ -20,7 +20,7 @@ locations, on top of the original idea.
 ## Install
 
 Download `goclaude-1.5.0.dmg` from the
-[latest release](https://github.com/spurious-cox/go.claude/releases/latest)
+[latest release](https://github.com/spurious-cox/goclaude/releases/latest)
 (signed with a Developer ID and notarized by Apple), or just copy the
 `goclaude` file from this repository. Put it somewhere on your machine, for
 example `~/bin/`, and make it executable:
@@ -119,7 +119,7 @@ click a folder to walk into it, click a file to preview it with Quick Look.
 
 - **gobrowser.app in `/Applications`** (or `~/Applications`). Without it
   `go -g` prints an error. Get it from the disk image of the
-  [latest release](https://github.com/spurious-cox/go.claude/releases/latest)
+  [latest release](https://github.com/spurious-cox/goclaude/releases/latest)
   (drag it to Applications), or build it yourself (below). The `goclaude`
   script itself needs nothing but Python 3.
 - **macOS 11 or later**, Apple silicon or Intel (the app is universal).

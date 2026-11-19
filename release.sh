@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Notarize gobrowser.app and build the goclaude disk image — v1.5.0
+# Notarize gobrowser.app and build the goclaude disk image — v1.6.0
 #
 # Run ./build.sh first. Notarizes and staples dist/gobrowser.app, then builds
 # dist/goclaude-<version>.dmg holding goclaude, gobrowser.app, README.md and
@@ -9,7 +9,7 @@
 set -e
 cd "${0:A:h}"
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 SIGN_ID="4208ABA3EC12F24C1F09C7BB624EFF68B44259DB"
 PROFILE="PixProNotary"
 DMG="dist/goclaude-${VERSION}.dmg"

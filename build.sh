@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build, sign and install gobrowser.app — v1.5.0
+# Build, sign and install gobrowser.app — v1.6.0
 #
 #   ./build.sh                build, sign, install to /Applications
 #   ./build.sh --no-install   build and sign into dist/ only

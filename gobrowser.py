@@ -3,7 +3,11 @@
 Launched by `go -g`. The first column lists the enabled bookmarks from
 ~/.go_locations; further columns walk into folders and show files.
 
-    Return / double-click   open the folder in Finder, or reveal the file there
+    Selecting an item       moves the front Finder window there (a file's folder, with
+                            the file selected); nothing happens if no Finder window is open
+    Return / double-click   open the folder in Finder; open a file the way goclaude does
+                            (text in $EDITOR, anything else in its default app, and
+                            ask which app to use when none is set)
     Add...                  save the front Finder folder (or a chosen one) as a bookmark
     Delete...               remove the selected bookmark (the folder itself is untouched)
     Delete / Backspace      same as Delete...
@@ -14,11 +18,14 @@ The bookmark file is read with read_locations() from the goclaude script,
 which is bundled into the app (or found beside this file when run from source).
 """
 
+import datetime
 import importlib.machinery
 import importlib.util
+import json  # noqa: F401  used by goclaude's launch_info(); importing it here bundles it
 import os
 import subprocess
 import sys
+import traceback
 
 import objc
 from AppKit import (
@@ -31,7 +38,7 @@ from AppKit import (
 from Foundation import NSURL, NSNotificationCenter
 from Quartz import QLPreviewView
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 
 def load_go():
@@ -47,6 +54,18 @@ def load_go():
 
 go = load_go()
 
+LOG = os.path.expanduser("~/Library/Logs/gobrowser.log")
+
+
+def log(msg):
+    """Records errors from opening files, for troubleshooting."""
+    try:
+        import datetime
+        with open(LOG, "a") as f:
+            f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
+    except OSError:
+        pass
+
 
 def is_folder(path):
     """A real folder, not an app or other package (those open, not expand)."""
@@ -54,13 +73,90 @@ def is_folder(path):
     return os.path.isdir(path) and not ws.isFilePackageAtPath_(path)
 
 
-def open_in_finder(path):
+def open_item(path):
+    """Folders open in Finder, apps launch, files open as `go` opens them."""
     if not os.path.exists(path):
         return
     if is_folder(path):
         subprocess.Popen(["open", path])
+    elif not os.path.isfile(path):          # an app or other package
+        subprocess.Popen(["open", path])
     else:
+        open_file(path)
+
+
+def open_file(path):
+    """Text in $EDITOR (when `go -g` passed it on), else the default app; ask if there is none."""
+    info = go.launch_info(path)
+    if info is None:
+        subprocess.Popen(["open", path])
+        return
+    unknown = info["uti"] in ("", "public.data") or info["uti"].startswith("dyn.")
+    is_text = info["text"] or (unknown and go.looks_like_text(path))
+    editor = os.environ.get("EDITOR", "")
+    if is_text and editor.endswith(".app"):
+        subprocess.Popen(["open", "-a", editor, path])
+    elif info["app"]:
+        subprocess.Popen(["open", path])
+    elif is_text:
+        subprocess.Popen(["open", "-t", path])   # the default text editor
+    else:
+        ask_how_to_open(path, info["apps"])
+
+
+def ask_how_to_open(path, apps):
+    """No app is set to open this file: let the user pick one, or show it in Finder."""
+    from AppKit import NSPopUpButton
+    apps = [a for a in apps if a.endswith(".app")]
+    editor = os.environ.get("EDITOR", "")
+    if editor.endswith(".app") and editor not in apps:
+        apps.append(editor)
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(f"No app is set to open \u201c{os.path.basename(path)}\u201d.")
+    alert.setInformativeText_("Choose an app to open it with.")
+    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 260, 26), False)
+    for a in apps:
+        popup.addItemWithTitle_(os.path.splitext(os.path.basename(a))[0])
+    popup.addItemWithTitle_("Other App\u2026")
+    alert.setAccessoryView_(popup)
+    alert.addButtonWithTitle_("Open")
+    alert.addButtonWithTitle_("Show in Finder")
+    alert.addButtonWithTitle_("Cancel")
+    answer = alert.runModal()
+    if answer == 1001:                      # Show in Finder
         subprocess.Popen(["open", "-R", path])
+        return
+    if answer != 1000:                      # Cancel
+        return
+    i = popup.indexOfSelectedItem()
+    if i < len(apps):
+        subprocess.Popen(["open", "-a", apps[i], path])
+        return
+    panel = NSOpenPanel.openPanel()
+    panel.setDirectoryURL_(NSURL.fileURLWithPath_("/Applications"))
+    panel.setAllowedFileTypes_(["app"])
+    panel.setPrompt_("Open")
+    panel.setMessage_(f"Choose an app to open \u201c{os.path.basename(path)}\u201d")
+    if panel.runModal() == 1:
+        subprocess.Popen(["open", "-a", panel.URL().path(), path])
+
+
+def follow_in_finder(path):
+    """Point the front Finder window at the selected folder (or at a file's folder, with
+    the file selected), without bringing Finder forward. Does nothing if no Finder
+    window is open."""
+    if not os.path.exists(path):
+        return
+    folder, item = (path, None) if is_folder(path) else (os.path.dirname(path), path)
+    q = lambda p: '"' + p.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    script = ('tell application "Finder"\n'
+              '  if (count of Finder windows) > 0 then\n'
+              f'    set target of front Finder window to (POSIX file {q(folder)} as alias)\n'
+              + (f'    select (POSIX file {q(item)} as alias)\n' if item else '') +
+              '  end if\n'
+              'end tell')
+    subprocess.Popen(["osascript", "-e", script],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def front_finder_folder():
@@ -273,7 +369,33 @@ class AppDelegate(NSObject):
         browser.setDelegate_(self)
         browser.setTarget_(self)
         browser.setAction_(b"selectionChanged:")
-        browser.setDoubleAction_(b"openSelection:")
+        # NSBrowser only sends its doubleAction for some columns (not for files in later
+        # columns once a preview is showing), so double-clicks are caught here instead:
+        # any double-click inside the browser opens what it selected.
+        from AppKit import NSEvent, NSPointInRect
+        def double_click(event):
+            if event.clickCount() != 2:
+                return event
+            w = event.window()
+            if w is not None:
+                if w.windowNumber() != self.window.windowNumber():
+                    return event
+                p = event.locationInWindow()
+            else:
+                # Events posted straight to the app carry no window; use the screen point.
+                from Quartz import CGEventGetLocation
+                from AppKit import NSScreen
+                loc = CGEventGetLocation(event.CGEvent())
+                top = NSScreen.screens()[0].frame().size.height
+                p = self.window.convertPointFromScreen_((loc.x, top - loc.y))
+            p = self.browser.convertPoint_fromView_(p, None)
+            inside = NSPointInRect(p, self.browser.bounds())
+            if inside:
+                # after the browser has handled the click and updated the selection
+                self.performSelector_withObject_afterDelay_(b"openSelection:", None, 0.05)
+            return event
+        self.double_click_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            1 << 2, double_click)   # left mouse up
         browser.setAutoresizingMask_(18)  # width | height sizable
         browser.setMinColumnWidth_(180)
         browser.setMaxVisibleColumns_(6)
@@ -356,6 +478,8 @@ class AppDelegate(NSObject):
 
     def selectionChanged_(self, _sender):
         item = self.selectedItem()
+        if item is not None:
+            follow_in_finder(item.path)
         self.delete_button.setEnabled_(self.selectedBookmark() is not None)
         self.window.setTitle_(
             go_title(item.path) if item is not None else "go bookmarks")
@@ -447,7 +571,10 @@ class AppDelegate(NSObject):
     def openSelection_(self, _sender):
         item = self.selectedItem()
         if item is not None:
-            open_in_finder(item.path)
+            try:
+                open_item(item.path)
+            except Exception:
+                log(traceback.format_exc())
 
 
 def go_title(path):

@@ -29,7 +29,8 @@ OPTIONS = {
     "argv_emulation": False,
     "arch": "universal2",
     "excludes": ["tkinter", "test", "unittest", "pydoc_data"],
-    "includes": ["importlib.machinery", "importlib.util", "subprocess"],
+    # goclaude is bundled as a data file, so py2app can't see its imports: list them here.
+    "includes": ["importlib.machinery", "importlib.util", "subprocess", "json", "datetime"],
     "plist": {
         "CFBundleName": "gobrowser",
         "CFBundleDisplayName": "gobrowser",

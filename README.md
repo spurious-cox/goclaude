@@ -3,7 +3,7 @@
 A small command-line tool for bookmarking places on your Mac and jumping to
 them with a short name. A bookmark can be a folder, a file, a document, a
 program or an app, and `go <name>` does the sensible thing for each: it changes
-into a folder, opens a file in your editor, launches an app, and so on.
+into a folder, opens a file (text in your editor, anything else in its default app), launches an app, and so on.
 
 It is one Python 3 script with no dependencies beyond the standard library.
 macOS only (it uses `open` and `qlmanage`).
@@ -64,7 +64,8 @@ USAGE:
 
 LOCATION TYPES:
     d - directory (changes to directory)
-    f - file (opens in $EDITOR)
+    f - file (text opens in $EDITOR; PDFs, images etc. in their default app;
+        if no app is set to open it, go asks which to use)
     m - macOS document (.numbers, .pages, .key, etc. - opens with default app)
     e - executable (runs binaries; scripts and dotfiles open in $EDITOR)
     b - bundle/app (opens with 'open' command)
@@ -96,8 +97,12 @@ NOTES:
 view. The first column lists your enabled bookmarks, in alphabetical order, from `~/.go_locations`;
 click a folder to walk into it, click a file to preview it with Quick Look.
 
-- **Return** or **double-click** opens the selected folder in Finder, or
-  reveals the selected file there (the same as `go -find`).
+- **Selecting** a folder moves the front Finder window there; selecting a file shows
+  its folder with the file selected. (Nothing happens if no Finder window is open.)
+- **Return** or **double-click** opens the selected folder in Finder, launches an
+  app, and opens a file the way `go` does: text in your `$EDITOR`, anything else in
+  its default app. If no app is set to open the file, gobrowser asks which app to use
+  (or shows the file in Finder).
 - **Add…** (bottom left) asks for a short name and saves the front Finder
   window's folder as a bookmark, or a folder you choose. Duplicate names are
   refused and only one line is appended to `~/.go_locations`. If the name

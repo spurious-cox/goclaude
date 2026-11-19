@@ -8,7 +8,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-VERSION = '1.5.0'
+VERSION = '1.6.0'
 GO_LOCATIONS = Path.home() / '.go_locations'
 
 def parse_line(line):
@@ -121,6 +121,109 @@ def is_runnable(path):
             return f.read(2) != b'#!'
     except OSError:
         return False
+
+# Asks Launch Services (through JavaScript for Automation, so no extra Python modules are
+# needed) for a file's type, whether it is plain text, its default app and the other apps
+# that can open it.
+_LS_JXA = r'''
+ObjC.import('AppKit');
+function run(argv) {
+    const ws = $.NSWorkspace.sharedWorkspace;
+    const url = $.NSURL.fileURLWithPath(argv[0]);
+    const app = ws.URLForApplicationToOpenURL(url);
+    const all = ws.URLsForApplicationsToOpenURL(url);
+    const apps = [];
+    for (let i = 0; i < all.count; i++) apps.push(all.objectAtIndex(i).path.js);
+    const t = ws.typeOfFileError(argv[0], null);
+    const uti = t.isNil() ? '' : t.js;
+    return JSON.stringify({
+        uti: uti,
+        text: uti !== '' && ws.typeConformsToType(uti, 'public.text')
+              && !ws.typeConformsToType(uti, 'public.rtf') && !ws.typeConformsToType(uti, 'com.apple.rtfd'),
+        app: app.isNil() ? null : app.path.js,
+        apps: apps
+    });
+}
+'''
+
+def launch_info(path):
+    """{'uti', 'text', 'app', 'apps'} for a file, from Launch Services; None if that fails."""
+    import json
+    try:
+        out = subprocess.run(['osascript', '-l', 'JavaScript', '-e', _LS_JXA, path],
+                             capture_output=True, text=True, timeout=15)
+        return json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+def looks_like_text(path):
+    """For files whose type macOS doesn't know: text if the start has no NUL bytes and is UTF-8."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(8192)
+    except OSError:
+        return False
+    if b'\0' in head:
+        return False
+    try:
+        head.decode('utf-8')
+    except UnicodeDecodeError as e:
+        return e.start > len(head) - 4   # only a character cut off at the end
+    return True
+
+def open_in_editor(path):
+    editor = os.environ.get('EDITOR', 'vi')
+    if editor.endswith('.app'):
+        subprocess.run(['open', '-a', editor, path])
+    else:
+        subprocess.run([editor, path])
+
+def open_file(path):
+    """Open a file the way Finder would: text in $EDITOR, everything else in its default app.
+    If no app is set to open it, ask which to use."""
+    info = launch_info(path)
+    if info is None:
+        subprocess.run(['open', path])
+        return
+    unknown = info['uti'] == '' or info['uti'].startswith('dyn.') or info['uti'] == 'public.data'
+    if info['text'] or (unknown and looks_like_text(path)):
+        open_in_editor(path)
+    elif info['app']:
+        subprocess.run(['open', path])
+    else:
+        ask_how_to_open(path, info['apps'])
+
+def ask_how_to_open(path, apps):
+    """No default app: list the apps that say they can open the file, plus other choices."""
+    name = os.path.basename(path)
+    apps = [a for a in apps if a.endswith('.app')][:9]
+    editor = os.environ.get('EDITOR', 'vi')
+    editor_name = Path(editor).stem if editor.endswith('.app') else editor
+    print(f"No app is set to open '{name}'. Open it with:", file=sys.stderr)
+    for i, a in enumerate(apps, 1):
+        print(f"  {i}) {Path(a).stem}", file=sys.stderr)
+    print(f"  e) {editor_name}  (as text)", file=sys.stderr)
+    print(f"  q) Quick Look", file=sys.stderr)
+    print(f"  f) Show in Finder", file=sys.stderr)
+    print(f"  Return) cancel", file=sys.stderr)
+    try:
+        with open('/dev/tty') as tty:
+            print("Choice: ", end='', file=sys.stderr, flush=True)
+            choice = tty.readline().strip().lower()
+    except OSError:
+        # No terminal to ask in: show it in Finder rather than guess.
+        subprocess.run(['open', '-R', path])
+        return
+    if choice.isdigit() and 1 <= int(choice) <= len(apps):
+        subprocess.run(['open', '-a', apps[int(choice) - 1], path])
+    elif choice == 'e':
+        open_in_editor(path)
+    elif choice == 'q':
+        subprocess.run(['/usr/bin/qlmanage', '-p', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif choice == 'f':
+        subprocess.run(['open', '-R', path])
+    else:
+        print("Cancelled.", file=sys.stderr)
 
 def get_type(path):
     """Determine type based on path."""
@@ -304,13 +407,16 @@ def find_location(mnemonic):
 
 def launch_gui():
     """Open the gobrowser column-browser window (a separate signed app)."""
+    # Apps opened by Finder don't see shell variables; pass $EDITOR on so gobrowser opens
+    # text files in the same editor as `go`.
+    env = ['--env', f"EDITOR={os.environ['EDITOR']}"] if os.environ.get('EDITOR') else []
     for folder in ('/Applications', str(Path.home() / 'Applications')):
         app = os.path.join(folder, 'gobrowser.app')
         if os.path.isdir(app):
-            subprocess.run(['open', app])
+            subprocess.run(['open', *env, app])
             return
     # Not in the usual places: let Launch Services find it anywhere.
-    if subprocess.run(['open', '-a', 'gobrowser'],
+    if subprocess.run(['open', *env, '-a', 'gobrowser'],
                       stderr=subprocess.DEVNULL).returncode != 0:
         print("Error: gobrowser.app not found. Install it in /Applications.",
               file=sys.stderr)
@@ -367,7 +473,7 @@ def execute_location(mnemonic):
     
     if type_char == 'd':
         # Change directory - print command for shell to execute
-        print(f"cd '{path}'")
+        print(f"cd '{path}'")   # your zsh cd function prints the new directory
     elif type_char == 'm':
         # macOS document - open with default app
         # Special handling for CSV - don't auto-open, just show options
@@ -385,22 +491,14 @@ def execute_location(mnemonic):
             # Non-CSV documents open normally
             subprocess.run(['open', path])
     elif type_char == 'f':
-        editor = os.environ.get('EDITOR', 'vi')
-        # If editor is a .app bundle, use 'open' to launch it
-        if editor.endswith('.app'):
-            subprocess.run(['open', '-a', editor, path])
-        else:
-            subprocess.run([editor, path])
+        # Text in $EDITOR; PDFs, images and other documents in their default app
+        open_file(path)
     elif type_char == 'e':
         if is_runnable(path):
             subprocess.run([path])
         else:
-            # Scripts, dotfiles and non-executables open in the editor
-            editor = os.environ.get('EDITOR', 'vi')
-            if editor.endswith('.app'):
-                subprocess.run(['open', '-a', editor, path])
-            else:
-                subprocess.run([editor, path])
+            # Scripts and dotfiles open in the editor; anything else in its default app
+            open_file(path)
     elif type_char == 'b':
         subprocess.run(['open', path])
     else:
@@ -429,7 +527,8 @@ USAGE:
 
 LOCATION TYPES:
     d - directory (changes to directory)
-    f - file (opens in $EDITOR)
+    f - file (text opens in $EDITOR; PDFs, images etc. in their default app;
+        if no app is set to open it, go asks which to use)
     m - macOS document (.numbers, .pages, .key, etc. - opens with default app)
     e - executable (runs binaries; scripts and dotfiles open in $EDITOR)
     b - bundle/app (opens with 'open' command)
